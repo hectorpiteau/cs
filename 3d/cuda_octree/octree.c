@@ -1,0 +1,1 @@
+void octree_init(octree_t *octree) {

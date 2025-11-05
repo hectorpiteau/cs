@@ -1,0 +1,21 @@
+{
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview"
+	},
+	"dependencies": {
+		"@types/three": "^0.177.0",
+		"@webgpu/types": "^0.1.62",
+		"preact": "^10.25.3",
+		"preact-iso": "^2.9.2",
+		"three": "^0.177.0"
+	},
+	"devDependencies": {
+		"@preact/preset-vite": "^2.9.3",
+		"typescript": "^5.8.3",
+		"vite": "^6.0.4"
+	}
+}
