@@ -5,56 +5,7 @@ from imgui_bundle import imgui, immapp, hello_imgui, ImVec2
 import time
 import ctypes
 import sys
-
-# Vertex & fragment shaders (simple Lambert shading)
-VERTEX_SHADER_SOURCE = '''
-#version 330 core
-layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_normal;
-
-uniform mat4 u_model;
-uniform mat4 u_view;
-uniform mat4 u_projection;
-
-out vec3 v_normal;
-out vec3 v_world_pos;
-
-void main() {
-    vec4 world_pos = u_model * vec4(in_position, 1.0);
-    v_world_pos = world_pos.xyz;
-    v_normal = mat3(u_model) * in_normal;
-    gl_Position = u_projection * u_view * world_pos;
-}
-'''
-
-FRAGMENT_SHADER_SOURCE = '''
-#version 330 core
-in vec3 v_normal;
-in vec3 v_world_pos;
-
-uniform vec3 u_light_dir;
-uniform vec3 u_color;
-uniform vec3 u_ambient_sky;
-uniform vec3 u_ambient_ground;
-uniform float u_ambient_intensity;
-
-out vec4 f_color;
-
-void main() {
-    vec3 N = normalize(v_normal);
-    vec3 L = normalize(u_light_dir);
-    float lambert = max(dot(N, L), 0.0);
-    vec3 diffuse = lambert * u_color;
-
-    // Hemisphere ambient (simple GI approximation):
-    // N.y in [-1, 1] mixes ground (down) and sky (up)
-    float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 hemi_ambient = mix(u_ambient_ground, u_ambient_sky, hemi);
-    vec3 ambient = u_ambient_intensity * hemi_ambient * u_color;
-
-    f_color = vec4(diffuse + ambient, 1.0);
-}
-'''
+from shaders.loader import load_vertex_fragment
 
 def create_cube():
     """Create cube vertex data (position + normal)"""
@@ -195,27 +146,6 @@ def create_sphere_vao(stacks: int = 20, slices: int = 32):
 
     vertex_count = len(vertices_np) // 6
     return vao, vertex_count
-
-LINE_VERTEX_SHADER = '''
-#version 330 core
-layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_color;
-uniform mat4 u_mvp;
-out vec3 v_color;
-void main() {
-    v_color = in_color;
-    gl_Position = u_mvp * vec4(in_position, 1.0);
-}
-'''
-
-LINE_FRAGMENT_SHADER = '''
-#version 330 core
-in vec3 v_color;
-out vec4 f_color;
-void main() {
-    f_color = vec4(v_color, 1.0);
-}
-'''
 
 def create_grid_vao(size: int = 10, step: int = 1):
     """Create a grid on XZ plane centered at origin using GL_LINES with per-vertex color."""
@@ -433,6 +363,25 @@ class AppState:
         # Debug cameras (frusta + gizmos)
         self.debug_cameras = []  # list of dicts: {vao, vbo, count, model}
 
+        # Image viewer (numpy -> GL texture)
+        self.image_tex = None
+        self.image_width = 0
+        self.image_height = 0
+        self.image_channels = 0
+
+        # Point cloud resources & params
+        self.point_shader = None
+        self.loc_point_mvp = None
+        self.loc_point_size = None
+        self.point_vao = None
+        self.point_vbo = None
+        self.point_count = 0
+        self.point_spacing = 0.05
+        self.point_half_extent = 2.0
+        self.point_height_sigma = 0.1
+        self.point_size_px = 3.0
+        self.point_color = glm.vec3(0.1, 0.8, 1.0)
+
     def add_camera_representation(self, pos: glm.vec3, target: glm.vec3, up: glm.vec3,
                                   fov_y_deg: float, aspect: float,
                                   near_d: float, length: float,
@@ -460,10 +409,12 @@ class AppState:
         """Initialize OpenGL resources"""
         print("Initializing 3D resources...")
         
-        # Create shader program
-        self.shader_program = create_shader_program(VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE)
+        # Create shader program from external files
+        lambert_vsrc, lambert_fsrc = load_vertex_fragment("simple_lambert.vertex.shader", "simple_lambert.fragment.shader")
+        self.shader_program = create_shader_program(lambert_vsrc, lambert_fsrc)
         # Line shader
-        self.line_shader = create_shader_program(LINE_VERTEX_SHADER, LINE_FRAGMENT_SHADER)
+        line_vsrc, line_fsrc = load_vertex_fragment("line.vertex.shader", "line.fragment.shader")
+        self.line_shader = create_shader_program(line_vsrc, line_fsrc)
         self.loc_line_mvp = GL.glGetUniformLocation(self.line_shader, "u_mvp")
         
         # Create cube VAO
@@ -471,6 +422,13 @@ class AppState:
         # Create helpers: grid and gizmo
         self.grid_vao, self.grid_vertex_count = create_grid_vao()
         self.gizmo_vao, self.gizmo_vertex_count = create_gizmo_vao()
+
+        # Point shader
+        pts_vsrc, pts_fsrc = load_vertex_fragment("points.vertex.shader", "points.fragment.shader")
+        self.point_shader = create_shader_program(pts_vsrc, pts_fsrc)
+        self.loc_point_mvp = GL.glGetUniformLocation(self.point_shader, "u_mvp")
+        self.loc_point_size = GL.glGetUniformLocation(self.point_shader, "u_point_size")
+        self.generate_point_cloud()
 
         # Add a test camera at (4,4,4) looking at (5,4,4)
         self.add_camera_representation(
@@ -508,6 +466,20 @@ class AppState:
             GL.glDeleteProgram(self.shader_program)
         if self.line_shader:
             GL.glDeleteProgram(self.line_shader)
+        if self.point_shader:
+            GL.glDeleteProgram(self.point_shader)
+        if self.point_vao:
+            try:
+                GL.glDeleteVertexArrays(1, [self.point_vao])
+            except Exception:
+                pass
+            self.point_vao = None
+        if self.point_vbo:
+            try:
+                GL.glDeleteBuffers(1, [self.point_vbo])
+            except Exception:
+                pass
+            self.point_vbo = None
         # Destroy debug camera VAOs/VBOs
         for cam in self.debug_cameras:
             try:
@@ -518,6 +490,92 @@ class AppState:
             except Exception:
                 pass
         self.debug_cameras.clear()
+        # Destroy image texture
+        if self.image_tex:
+            try:
+                GL.glDeleteTextures(1, [self.image_tex])
+            except Exception:
+                pass
+            self.image_tex = None
+
+    def set_image_numpy(self, image_np: np.ndarray):
+        """Upload a numpy uint8 image to an OpenGL texture for display.
+        Accepts HxW, HxWx1, HxWx3, HxWx4 arrays (uint8). Other dtypes will be converted to uint8.
+        """
+        if image_np is None:
+            return
+        arr = np.asarray(image_np)
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+        if arr.ndim == 2:
+            arr = np.stack((arr, arr, arr), axis=2)
+        elif arr.ndim == 3 and arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        elif arr.ndim == 3 and arr.shape[2] in (3, 4):
+            pass
+        else:
+            # Unsupported shape; try to interpret last dim as channels
+            raise ValueError("Unsupported image shape for viewer: expected HxW, HxWx1, HxWx3, or HxWx4")
+
+        h, w, c = arr.shape
+        self.image_width, self.image_height, self.image_channels = w, h, c
+
+        # Ensure contiguous
+        arr = np.ascontiguousarray(arr)
+
+        # Prepare GL texture
+        if not self.image_tex:
+            self.image_tex = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self.image_tex)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        else:
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self.image_tex)
+
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        if c == 3:
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB, w, h, 0, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, arr)
+        else:  # c == 4
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, arr)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+
+    def generate_point_cloud(self):
+        """Generate a 2D grid on XZ with Gaussian height on Y and upload to GPU."""
+        # Build grid coordinates
+        half = float(self.point_half_extent)
+        step = float(self.point_spacing)
+        xs = np.arange(-half, half + 1e-6, step, dtype=np.float32)
+        zs = np.arange(-half, half + 1e-6, step, dtype=np.float32)
+        X, Z = np.meshgrid(xs, zs)
+        Y = np.random.normal(loc=0.0, scale=float(self.point_height_sigma), size=X.shape).astype(np.float32)
+        pts = np.stack([X, Y, Z], axis=2).reshape(-1, 3)
+        # Normalize to [0,1] for colors based on position
+        min_xyz = pts.min(axis=0)
+        max_xyz = pts.max(axis=0)
+        rng = np.maximum(max_xyz - min_xyz, 1e-6)
+        cols = (pts - min_xyz) / rng
+        cols = np.clip(cols, 0.0, 1.0).astype(np.float32)
+        interleaved = np.concatenate([pts, cols], axis=1)
+        self.point_count = pts.shape[0]
+
+        # Upload to GPU
+        interleaved = np.ascontiguousarray(interleaved, dtype=np.float32)
+        if not self.point_vao:
+            self.point_vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self.point_vao)
+        if not self.point_vbo:
+            self.point_vbo = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.point_vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, interleaved.nbytes, interleaved, GL.GL_STATIC_DRAW)
+        stride = 6 * 4
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(3 * 4))
+        GL.glEnableVertexAttribArray(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        GL.glBindVertexArray(0)
 
     def destroy_fbo(self):
         if self.fbo:
@@ -647,9 +705,13 @@ class AppState:
             GL.glBindVertexArray(0)
         GL.glEnable(GL.GL_DEPTH_TEST)
 
+        # Draw point cloud (world space)
+        self.draw_point_cloud(projection_array, view_array)
+
         # Draw debug camera frusta and their gizmos
         # For frusta in world space, model is identity
         mvp_lines = projection_array @ view_array
+        GL.glUseProgram(self.line_shader)
         GL.glUniformMatrix4fv(self.loc_line_mvp, 1, GL.GL_TRUE, mvp_lines)
         for cam in self.debug_cameras:
             # If frustum length changed, rebuild this camera's frustum VBO in world space
@@ -689,6 +751,7 @@ class AppState:
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
 
     def draw_cube(self):
+        return
         if not self.vao:
             return
         GL.glBindVertexArray(self.vao)
@@ -701,6 +764,19 @@ class AppState:
         GL.glBindVertexArray(self.sphere_vao)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.sphere_vertex_count)
         GL.glBindVertexArray(0)
+
+    def draw_point_cloud(self, projection_array, view_array):
+        if not self.point_shader or not self.point_vao or self.point_count <= 0:
+            return
+        GL.glEnable(GL.GL_PROGRAM_POINT_SIZE)
+        mvp = projection_array @ view_array
+        GL.glUseProgram(self.point_shader)
+        GL.glUniformMatrix4fv(self.loc_point_mvp, 1, GL.GL_TRUE, mvp)
+        GL.glUniform1f(self.loc_point_size, float(self.point_size_px))
+        GL.glBindVertexArray(self.point_vao)
+        GL.glDrawArrays(GL.GL_POINTS, 0, self.point_count)
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(0)
 
 
 def scaled_display_size():
@@ -804,12 +880,60 @@ def gui(app_state: AppState):
         app_state.cam_distance = 6.0
 
     imgui.separator()
+    imgui.text("Point Cloud:")
+    changed, app_state.point_spacing = imgui.slider_float("Spacing", float(app_state.point_spacing), 0.01, 0.2)
+    changed2, app_state.point_half_extent = imgui.slider_float("Half extent", float(app_state.point_half_extent), 0.5, 10.0)
+    changed3, app_state.point_height_sigma = imgui.slider_float("Height sigma", float(app_state.point_height_sigma), 0.0, 0.5)
+    changed4, app_state.point_size_px = imgui.slider_float("Point size", float(app_state.point_size_px), 1.0, 10.0)
+    if imgui.button("Rebuild point cloud") or changed or changed2 or changed3:
+        app_state.generate_point_cloud()
+
+    imgui.separator()
     imgui.text(f"Current Angle:")
     imgui.text(f"  X: {app_state.angle.x:.1f}°")
     imgui.text(f"  Y: {app_state.angle.y:.1f}°")
     imgui.text(f"  Z: {app_state.angle.z:.1f}°")
     imgui.text(f"FPS: {hello_imgui.frame_rate():.1f}")
     
+    imgui.end()
+
+    # Image viewer window
+    imgui.set_next_window_pos(ImVec2(820, 360), imgui.Cond_.appearing)
+    imgui.set_next_window_size(ImVec2(320, 280), imgui.Cond_.appearing)
+    imgui.begin("Image Viewer")
+    if app_state.image_tex:
+        avail2 = imgui.get_content_region_avail()
+        # Keep aspect ratio
+        if app_state.image_width > 0 and app_state.image_height > 0:
+            aspect = app_state.image_width / app_state.image_height
+            draw_w = avail2.x
+            draw_h = draw_w / aspect
+            if draw_h > avail2.y:
+                draw_h = avail2.y
+                draw_w = draw_h * aspect
+        else:
+            draw_w = avail2.x
+            draw_h = avail2.y
+        tex_ref = imgui.ImTextureRef(int(app_state.image_tex))
+        # Flip vertically so that numpy row 0 appears at top
+        imgui.image(tex_ref, ImVec2(draw_w, draw_h), ImVec2(0, 1), ImVec2(1, 0))
+        # Overlay: draw a 5px-radius circle outline at the image center
+        p0 = imgui.get_item_rect_min()
+        p1 = imgui.get_item_rect_max()
+        cx = (p0.x + p1.x) * 0.5
+        cy = (p0.y + p1.y) * 0.5
+        draw_list = imgui.get_window_draw_list()
+        draw_list.add_circle(ImVec2(cx, cy), 5.0, 0xff00ff00, 32, 2.0)
+        imgui.text(f"{app_state.image_width}x{app_state.image_height}x{app_state.image_channels}")
+    else:
+        imgui.text("No image uploaded. Use app_state.set_image_numpy(np_image)")
+        if imgui.button("Load test image"):
+            # Demo: upload a simple gradient test image
+            h, w = 240, 320
+            y = np.linspace(0, 255, h, dtype=np.uint8)[:, None]
+            x = np.linspace(0, 255, w, dtype=np.uint8)[None, :]
+            test = np.stack([x.repeat(h,0), y.repeat(w,1), np.full((h,w),128, np.uint8)], axis=2)
+            app_state.set_image_numpy(test)
     imgui.end()
 
 
