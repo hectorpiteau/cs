@@ -3,260 +3,21 @@ import numpy as np
 from pyglm import glm
 from imgui_bundle import imgui, immapp, hello_imgui, ImVec2
 import time
+import random
 import ctypes
 import sys
 from shaders.loader import load_vertex_fragment
+from primitives.cube import create_cube_vao, create_cube
+from primitives.grid import create_grid_vao
+from primitives.gizmo import create_gizmo_vao
+from primitives.sphere import create_sphere_vao
+from shaders.utils import create_shader_program
 
-def create_cube():
-    """Create cube vertex data (position + normal)"""
-    pos = [
-        (-1, -1, -1), (+1, -1, -1), (+1, +1, -1), (-1, +1, -1),
-        (-1, -1, +1), (+1, -1, +1), (+1, +1, +1), (-1, +1, +1),
-    ]
-    vertices = []
-    for face in [
-        (0,1,2,3, (0,0,-1)),
-        (4,5,6,7, (0,0,1)),
-        (0,1,5,4, (0,-1,0)),
-        (2,3,7,6, (0,1,0)),
-        (0,3,7,4, (-1,0,0)),
-        (1,2,6,5, (1,0,0)),
-    ]:
-        i0,i1,i2,i3, n = face
-        for tri in [(i0,i1,i2),(i0,i2,i3)]:
-            for i in tri:
-                vertices.extend(pos[i])
-                vertices.extend(n)
-    return np.array(vertices, dtype='float32')
-
-# Shader utilities (from demo_bg.py)
-def fail_on_shader_compile_error(shader: int) -> None:
-    shader_compile_success = GL.glGetShaderiv(shader, GL.GL_COMPILE_STATUS)
-    if not shader_compile_success:
-        info_log = GL.glGetShaderInfoLog(shader)
-        print(f"ERROR::SHADER::COMPILATION_FAILED\n{info_log}", file=sys.stderr)
-        assert shader_compile_success, "Shader compilation failed"
-
-def fail_on_shader_link_error(shader_program: int) -> None:
-    is_linked = GL.glGetProgramiv(shader_program, GL.GL_LINK_STATUS)
-    if not is_linked:
-        info_log = GL.glGetProgramInfoLog(shader_program)
-        print(f"ERROR::SHADER::PROGRAM::LINKING_FAILED\n{info_log}", file=sys.stderr)
-        assert is_linked, "Shader program linking failed"
-
-def compile_shader(shader_type: int, source: str) -> int:
-    shader = GL.glCreateShader(shader_type)
-    GL.glShaderSource(shader, source)
-    GL.glCompileShader(shader)
-    fail_on_shader_compile_error(shader)
-    return shader
-
-def create_shader_program(vertex_shader_source: str, fragment_shader_source: str) -> int:
-    vertex_shader = compile_shader(GL.GL_VERTEX_SHADER, vertex_shader_source)
-    fragment_shader = compile_shader(GL.GL_FRAGMENT_SHADER, fragment_shader_source)
-    
-    shader_program = GL.glCreateProgram()
-    GL.glAttachShader(shader_program, vertex_shader)
-    GL.glAttachShader(shader_program, fragment_shader)
-    GL.glLinkProgram(shader_program)
-    fail_on_shader_link_error(shader_program)
-    
-    GL.glDeleteShader(vertex_shader)
-    GL.glDeleteShader(fragment_shader)
-    
-    return shader_program
-
-def create_cube_vao():
-    """Create VAO for the cube"""
-    vertices = create_cube()
-    
-    # Generate VAO and VBO
-    vao = GL.glGenVertexArrays(1)
-    GL.glBindVertexArray(vao)
-    
-    vbo = GL.glGenBuffers(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL.GL_STATIC_DRAW)
-    
-    # Position attribute (location 0)
-    GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 6 * 4, ctypes.c_void_p(0))
-    GL.glEnableVertexAttribArray(0)
-    
-    # Normal attribute (location 1)
-    GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
-    GL.glEnableVertexAttribArray(1)
-    
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-    GL.glBindVertexArray(0)
-    
-    return vao
-
-def create_sphere_vao(stacks: int = 20, slices: int = 32):
-    """Create a UV sphere VAO with positions and normals (triangles)."""
-    vertices = []
-    for i in range(stacks):
-        phi0 = np.pi * i / stacks
-        phi1 = np.pi * (i + 1) / stacks
-        for j in range(slices):
-            theta0 = 2 * np.pi * j / slices
-            theta1 = 2 * np.pi * (j + 1) / slices
-
-            # Four points on the sphere
-            p00 = np.array([
-                np.sin(phi0) * np.cos(theta0),
-                np.cos(phi0),
-                np.sin(phi0) * np.sin(theta0)
-            ], dtype=np.float32)
-            p01 = np.array([
-                np.sin(phi0) * np.cos(theta1),
-                np.cos(phi0),
-                np.sin(phi0) * np.sin(theta1)
-            ], dtype=np.float32)
-            p10 = np.array([
-                np.sin(phi1) * np.cos(theta0),
-                np.cos(phi1),
-                np.sin(phi1) * np.sin(theta0)
-            ], dtype=np.float32)
-            p11 = np.array([
-                np.sin(phi1) * np.cos(theta1),
-                np.cos(phi1),
-                np.sin(phi1) * np.sin(theta1)
-            ], dtype=np.float32)
-
-            # Two triangles per quad
-            for tri in [(p00, p10, p11), (p00, p11, p01)]:
-                for p in tri:
-                    n = p / np.linalg.norm(p)
-                    vertices.extend(p.tolist())
-                    vertices.extend(n.tolist())
-
-    vertices_np = np.array(vertices, dtype=np.float32)
-
-    vao = GL.glGenVertexArrays(1)
-    GL.glBindVertexArray(vao)
-    vbo = GL.glGenBuffers(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER, vertices_np.nbytes, vertices_np, GL.GL_STATIC_DRAW)
-    GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 6 * 4, ctypes.c_void_p(0))
-    GL.glEnableVertexAttribArray(0)
-    GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
-    GL.glEnableVertexAttribArray(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-    GL.glBindVertexArray(0)
-
-    vertex_count = len(vertices_np) // 6
-    return vao, vertex_count
-
-def create_grid_vao(size: int = 10, step: int = 1):
-    """Create a grid on XZ plane centered at origin using GL_LINES with per-vertex color."""
-    verts = []
-    color_main = (0.3, 0.3, 0.35)
-    for i in range(-size, size + 1, step):
-        # Lines parallel to X (vary z)
-        z = float(i)
-        verts.extend([-size, 0.0, z, *color_main])
-        verts.extend([ size, 0.0, z, *color_main])
-        # Lines parallel to Z (vary x)
-        x = float(i)
-        verts.extend([x, 0.0, -size, *color_main])
-        verts.extend([x, 0.0,  size, *color_main])
-    verts_np = np.array(verts, dtype=np.float32)
-
-    vao = GL.glGenVertexArrays(1)
-    GL.glBindVertexArray(vao)
-    vbo = GL.glGenBuffers(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER, verts_np.nbytes, verts_np, GL.GL_STATIC_DRAW)
-    stride = 6 * 4
-    GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
-    GL.glEnableVertexAttribArray(0)
-    GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(3 * 4))
-    GL.glEnableVertexAttribArray(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-    GL.glBindVertexArray(0)
-    count = len(verts_np) // 6
-    return vao, count
-
-def create_gizmo_vao(length: float = 1.5, head: float = 0.15):
-    """Create simple axis gizmo with lines and V-shaped arrowheads for X(red), Y(green), Z(blue)."""
-    r,g,b = (1.0,0.1,0.1), (0.1,1.0,0.1), (0.1,0.3,1.0)
-    verts = []
-    # X axis
-    verts.extend([0,0,0, *r]); verts.extend([length,0,0, *r])
-    verts.extend([length,0,0, *r]); verts.extend([length-head, +head*0.5, 0, *r])
-    verts.extend([length,0,0, *r]); verts.extend([length-head, -head*0.5, 0, *r])
-    # Y axis
-    verts.extend([0,0,0, *g]); verts.extend([0,length,0, *g])
-    verts.extend([0,length,0, *g]); verts.extend([+head*0.5, length-head, 0, *g])
-    verts.extend([0,length,0, *g]); verts.extend([-head*0.5, length-head, 0, *g])
-    # Z axis
-    verts.extend([0,0,0, *b]); verts.extend([0,0,length, *b])
-    verts.extend([0,0,length, *b]); verts.extend([0, +head*0.5, length-head, *b])
-    verts.extend([0,0,length, *b]); verts.extend([0, -head*0.5, length-head, *b])
-
-    verts_np = np.array(verts, dtype=np.float32)
-    vao = GL.glGenVertexArrays(1)
-    GL.glBindVertexArray(vao)
-    vbo = GL.glGenBuffers(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER, verts_np.nbytes, verts_np, GL.GL_STATIC_DRAW)
-    stride = 6 * 4
-    GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
-    GL.glEnableVertexAttribArray(0)
-    GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(3 * 4))
-    GL.glEnableVertexAttribArray(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-    GL.glBindVertexArray(0)
-    count = len(verts_np) // 6
-    return vao, count
-
-def _create_lines_vao_from_vertices(verts_np: np.ndarray):
-    vao = GL.glGenVertexArrays(1)
-    GL.glBindVertexArray(vao)
-    vbo = GL.glGenBuffers(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
-    GL.glBufferData(GL.GL_ARRAY_BUFFER, verts_np.nbytes, verts_np, GL.GL_DYNAMIC_DRAW)
-    stride = 6 * 4
-    GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
-    GL.glEnableVertexAttribArray(0)
-    GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(3 * 4))
-    GL.glEnableVertexAttribArray(1)
-    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-    GL.glBindVertexArray(0)
-    count = len(verts_np) // 6
-    return vao, vbo, count
-
-def _build_frustum_lines(fov_y_deg: float, aspect: float, near_d: float, far_d: float,
-                         color=(1.0, 1.0, 0.2), include_image_plane: bool = True) -> np.ndarray:
-    """Build frustum rays from camera origin to image plane at distance far_d, plus image plane rectangle.
-    Camera looks along -Z in its local space.
-    """
-    fov = np.radians(fov_y_deg)
-    hf = np.tan(fov / 2.0) * far_d
-    wf = hf * aspect
-
-    # Image plane (far plane) corners
-    tl = (-wf,  hf, -far_d)
-    tr = ( wf,  hf, -far_d)
-    br = ( wf, -hf, -far_d)
-    bl = (-wf, -hf, -far_d)
-
-    verts = []
-    # Rays from origin to corners (frustum edges)
-    for p in (tl, tr, br, bl):
-        verts.extend((0.0, 0.0, 0.0)); verts.extend(color)
-        verts.extend(p);                 verts.extend(color)
-
-    if include_image_plane:
-        # Image plane rectangle (wireframe) in white
-        plane_color = (1.0, 1.0, 1.0)
-        for a, b in ((tl, tr), (tr, br), (br, bl), (bl, tl)):
-            verts.extend(a); verts.extend(plane_color)
-            verts.extend(b); verts.extend(plane_color)
-
-    return np.array(verts, dtype=np.float32)
+from primitives.frustum import _build_frustum_lines_world
+from primitives.lines import _create_lines_vao_from_vertices
 
 def _model_from_pos_target_up(pos: glm.vec3, target: glm.vec3, up: glm.vec3) -> np.ndarray:
+    """Build a model matrix from position, target, and up vector."""
     forward = glm.normalize(target - pos)
     right = glm.normalize(glm.cross(forward, up))
     real_up = glm.cross(right, forward)
@@ -269,40 +30,44 @@ def _model_from_pos_target_up(pos: glm.vec3, target: glm.vec3, up: glm.vec3) -> 
     ], dtype=np.float32)
     return m
 
-def _build_frustum_lines_world(pos: glm.vec3, target: glm.vec3, up: glm.vec3,
-                               fov_y_deg: float, aspect: float, length: float,
-                               color=(1.0, 1.0, 0.2), include_image_plane: bool = True) -> np.ndarray:
-    """Build frustum edges and image plane rectangle directly in world coordinates."""
-    fov = np.radians(fov_y_deg)
-    hf = np.tan(fov / 2.0) * length
-    wf = hf * aspect
-    # Local camera basis
+def _build_gizmo_lines_world(pos: glm.vec3, target: glm.vec3, up: glm.vec3,
+                             length: float = 0.6, head: float = 0.08) -> np.ndarray:
+    """Build axis gizmo lines (with small arrowheads) in world coordinates starting at camera pos.
+    Colors: X=red, Y=green, Z=blue. Uses OpenGL convention (+Y up).
+    """
     fwd = glm.normalize(target - pos)
     right = glm.normalize(glm.cross(fwd, up))
     upv = glm.cross(right, fwd)
-    # Local far-plane corners in camera space (z forward)
-    tl = (-wf,  hf, length)
-    tr = ( wf,  hf, length)
-    br = ( wf, -hf, length)
-    bl = (-wf, -hf, length)
-    def to_world(p):
-        x,y,z = p
-        w = pos + right * x + upv * y + fwd * z
-        return (float(w.x), float(w.y), float(w.z))
-    TL, TR, BR, BL = map(to_world, (tl, tr, br, bl))
-    origin = (float(pos.x), float(pos.y), float(pos.z))
+    p = pos
+    # Axis endpoints
+    px = p + right * length
+    py = p + upv * length
+    pz = p + fwd * length
+    # Arrowhead offsets
+    x_left  = px - right * head + upv * (head * 0.6)
+    x_right = px - right * head - upv * (head * 0.6)
+    y_left  = py - upv * head + right * (head * 0.6)
+    y_right = py - upv * head - right * (head * 0.6)
+    z_left  = pz - fwd * head + right * (head * 0.6)
+    z_right = pz - fwd * head - right * (head * 0.6)
+    r, g, b = (1.0, 0.1, 0.1), (0.1, 1.0, 0.1), (0.1, 0.3, 1.0)
+    def pack(v, c):
+        return [float(v.x), float(v.y), float(v.z), *c]
     verts = []
-    # Rays
-    for p in (TL, TR, BR, BL):
-        verts.extend(origin); verts.extend(color)
-        verts.extend(p);      verts.extend(color)
-    # Image plane rectangle
-    if include_image_plane:
-        plane_color = (1.0, 1.0, 1.0)
-        for a,b in ((TL,TR),(TR,BR),(BR,BL),(BL,TL)):
-            verts.extend(a); verts.extend(plane_color)
-            verts.extend(b); verts.extend(plane_color)
+    # X axis + arrow
+    verts += pack(p, r);  verts += pack(px, r)
+    verts += pack(px, r); verts += pack(x_left, r)
+    verts += pack(px, r); verts += pack(x_right, r)
+    # Y axis + arrow
+    verts += pack(p, g);  verts += pack(py, g)
+    verts += pack(py, g); verts += pack(y_left, g)
+    verts += pack(py, g); verts += pack(y_right, g)
+    # Z axis + arrow
+    verts += pack(p, b);  verts += pack(pz, b)
+    verts += pack(pz, b); verts += pack(z_left, b)
+    verts += pack(pz, b); verts += pack(z_right, b)
     return np.array(verts, dtype=np.float32)
+
 
 class AppState:
     def __init__(self):
@@ -362,6 +127,10 @@ class AppState:
 
         # Debug cameras (frusta + gizmos)
         self.debug_cameras = []  # list of dicts: {vao, vbo, count, model}
+        # Link line connecting debug cameras (world-space)
+        self.cam_link_vao = None
+        self.cam_link_vbo = None
+        self.cam_link_count = 0
 
         # Image viewer (numpy -> GL texture)
         self.image_tex = None
@@ -389,11 +158,17 @@ class AppState:
         verts_world = _build_frustum_lines_world(pos, target, up, fov_y_deg, aspect, length,
                                                  color=color, include_image_plane=True)
         vao, vbo, count = _create_lines_vao_from_vertices(verts_world)
+        # Build a dedicated gizmo VAO in world space for this camera
+        gizmo_verts = _build_gizmo_lines_world(pos, target, up, length=0.5, head=0.07)
+        gizmo_vao, gizmo_vbo, gizmo_count = _create_lines_vao_from_vertices(gizmo_verts)
         model = _model_from_pos_target_up(pos, target, up)
         self.debug_cameras.append({
             'vao': vao,
             'vbo': vbo,
             'count': count,
+            'gizmo_vao': gizmo_vao,
+            'gizmo_vbo': gizmo_vbo,
+            'gizmo_count': gizmo_count,
             'model': model,
             'fov': float(fov_y_deg),
             'aspect': float(aspect),
@@ -404,6 +179,85 @@ class AppState:
             'target': glm.vec3(target),
             'up': glm.vec3(up),
         })
+        # Update the camera link line whenever a new camera is added
+        self.update_camera_link_line()
+
+    def update_camera_link_line(self):
+        """Rebuild a white line connecting all debug camera positions in sequence."""
+        # Destroy previous if exists
+        if self.cam_link_vao:
+            try:
+                GL.glDeleteVertexArrays(1, [self.cam_link_vao])
+            except Exception:
+                pass
+            self.cam_link_vao = None
+        if self.cam_link_vbo:
+            try:
+                GL.glDeleteBuffers(1, [self.cam_link_vbo])
+            except Exception:
+                pass
+            self.cam_link_vbo = None
+        self.cam_link_count = 0
+        # Need at least 2 cameras to draw a link
+        if len(self.debug_cameras) < 2:
+            return
+        # Build interleaved pos+color for GL_LINES segments between consecutive cameras
+        white = (1.0, 1.0, 1.0)
+        verts = []
+        for i in range(len(self.debug_cameras) - 1):
+            a = self.debug_cameras[i]['pos']
+            b = self.debug_cameras[i + 1]['pos']
+            verts.extend([float(a.x), float(a.y), float(a.z), *white])
+            verts.extend([float(b.x), float(b.y), float(b.z), *white])
+        verts_np = np.array(verts, dtype=np.float32)
+        # Upload
+        self.cam_link_vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self.cam_link_vao)
+        self.cam_link_vbo = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.cam_link_vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, verts_np.nbytes, verts_np, GL.GL_DYNAMIC_DRAW)
+        stride = 6 * 4
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(3 * 4))
+        GL.glEnableVertexAttribArray(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        GL.glBindVertexArray(0)
+        self.cam_link_count = len(verts_np) // 6
+    
+    def add_current_camera_to_scene(self):
+        """Get the current orbit camera view and add it to the list of debug cameras."""
+        # Calculate camera position from orbit controls
+        yaw_r = glm.radians(self.cam_yaw_deg)
+        pitch_r = glm.radians(self.cam_pitch_deg)
+        cx = self.cam_distance * glm.cos(pitch_r) * glm.cos(yaw_r)
+        cy = self.cam_distance * glm.sin(pitch_r)
+        cz = self.cam_distance * glm.cos(pitch_r) * glm.sin(yaw_r)
+        cam_pos = glm.vec3(cx, cy, cz)
+        
+        target = glm.vec3(0.0, 0.0, 0.0)
+        up = glm.vec3(0.0, 1.0, 0.0)
+        
+        # Use FBO aspect ratio if available, otherwise default
+        aspect = 1.6
+        if self.fbo_height > 0:
+            aspect = self.fbo_width / self.fbo_height
+            
+        # Other projection parameters from main camera
+        fov_y_deg = 45.0
+        near_d = 0.1
+        length = self.frustum_length
+        
+        # Assign a random bright color
+        color = (random.random() * 0.5 + 0.5, 
+                 random.random() * 0.5 + 0.5, 
+                 random.random() * 0.5 + 0.5)
+
+        self.add_camera_representation(
+            pos=cam_pos, target=target, up=up,
+            fov_y_deg=fov_y_deg, aspect=aspect,
+            near_d=near_d, length=length, color=color
+        )
     
     def init_3d_resources(self):
         """Initialize OpenGL resources"""
@@ -431,16 +285,27 @@ class AppState:
         self.generate_point_cloud()
 
         # Add a test camera at (4,4,4) looking at (5,4,4)
-        self.add_camera_representation(
-            pos=glm.vec3(4.0, 4.0, 4.0),
-            target=glm.vec3(5.0, 4.0, 4.0),
-            up=glm.vec3(0.0, 1.0, 0.0),
-            fov_y_deg=45.0,
-            aspect=1.6,
-            near_d=0.1,
-            length=self.frustum_length,
-            color=(1.0, 0.85, 0.2)
-        )
+        # self.add_camera_representation(
+        #     pos=glm.vec3(4.0, 4.0, 4.0),
+        #     target=glm.vec3(0.0, 4.0, 0.0),
+        #     up=glm.vec3(0.0, 1.0, 0.0),
+        #     fov_y_deg=45.0,
+        #     aspect=1.6,
+        #     near_d=0.1,
+        #     length=self.frustum_length,
+        #     color=(1.0, 0.85, 0.2)
+        # )
+        
+        # self.add_camera_representation(
+        #     pos=glm.vec3(10.0, 4.0, 4.0),
+        #     target=glm.vec3(0.0, 0.0, 0.0),
+        #     up=glm.vec3(0.0, 1.0, 0.0),
+        #     fov_y_deg=45.0,
+        #     aspect=1.6,
+        #     near_d=0.1,
+        #     length=self.frustum_length,
+        #     color=(1.0, 0.85, 0.2)
+        # )
         
         # Get uniform locations
         self.loc_model = GL.glGetUniformLocation(self.shader_program, "u_model")
@@ -487,9 +352,27 @@ class AppState:
                     GL.glDeleteVertexArrays(1, [cam['vao']])
                 if cam.get('vbo'):
                     GL.glDeleteBuffers(1, [cam['vbo']])
+                if cam.get('gizmo_vao'):
+                    GL.glDeleteVertexArrays(1, [cam['gizmo_vao']])
+                if cam.get('gizmo_vbo'):
+                    GL.glDeleteBuffers(1, [cam['gizmo_vbo']])
             except Exception:
                 pass
         self.debug_cameras.clear()
+        # Destroy camera link resources
+        if self.cam_link_vao:
+            try:
+                GL.glDeleteVertexArrays(1, [self.cam_link_vao])
+            except Exception:
+                pass
+            self.cam_link_vao = None
+        if self.cam_link_vbo:
+            try:
+                GL.glDeleteBuffers(1, [self.cam_link_vbo])
+            except Exception:
+                pass
+            self.cam_link_vbo = None
+        self.cam_link_count = 0
         # Destroy image texture
         if self.image_tex:
             try:
@@ -712,7 +595,6 @@ class AppState:
         # For frusta in world space, model is identity
         mvp_lines = projection_array @ view_array
         GL.glUseProgram(self.line_shader)
-        GL.glUniformMatrix4fv(self.loc_line_mvp, 1, GL.GL_TRUE, mvp_lines)
         for cam in self.debug_cameras:
             # If frustum length changed, rebuild this camera's frustum VBO in world space
             if abs(cam.get('length', self.frustum_length) - self.frustum_length) > 1e-6:
@@ -725,26 +607,26 @@ class AppState:
                 cam['count'] = len(verts_new) // 6
                 cam['length'] = float(self.frustum_length)
             # Frustum (world space)
+            GL.glUniformMatrix4fv(self.loc_line_mvp, 1, GL.GL_TRUE, mvp_lines)
             GL.glBindVertexArray(cam['vao'])
             GL.glLineWidth(1.0)
             GL.glDrawArrays(GL.GL_LINES, 0, cam['count'])
             GL.glBindVertexArray(0)
 
-            # Camera gizmo at its position/orientation (scaled small)
-            model_cam = np.array(cam['model'], dtype=np.float32)
-            s = 0.5
-            scale_m = np.array([
-                [s,0,0,0],
-                [0,s,0,0],
-                [0,0,s,0],
-                [0,0,0,1],
-            ], dtype=np.float32)
-            mvp_gz = projection_array @ view_array @ (model_cam @ scale_m)
-            GL.glUniformMatrix4fv(self.loc_line_mvp, 1, GL.GL_TRUE, mvp_gz)
-            if self.gizmo_vao and self.gizmo_vertex_count > 0:
-                GL.glBindVertexArray(self.gizmo_vao)
-                GL.glDrawArrays(GL.GL_LINES, 0, self.gizmo_vertex_count)
+            # Camera gizmo (pre-built in world space; lines start at camera.pos)
+            if cam.get('gizmo_vao') and cam.get('gizmo_count', 0) > 0:
+                GL.glUniformMatrix4fv(self.loc_line_mvp, 1, GL.GL_TRUE, mvp_lines)
+                GL.glBindVertexArray(cam['gizmo_vao'])
+                GL.glDrawArrays(GL.GL_LINES, 0, cam['gizmo_count'])
                 GL.glBindVertexArray(0)
+
+        # Draw link line connecting cameras (if available)
+        if self.cam_link_vao and self.cam_link_count > 0:
+            GL.glUniformMatrix4fv(self.loc_line_mvp, 1, GL.GL_TRUE, mvp_lines)
+            GL.glBindVertexArray(self.cam_link_vao)
+            GL.glLineWidth(1.0)
+            GL.glDrawArrays(GL.GL_LINES, 0, self.cam_link_count)
+            GL.glBindVertexArray(0)
 
         GL.glUseProgram(0)
         GL.glDisable(GL.GL_DEPTH_TEST)
@@ -878,6 +760,8 @@ def gui(app_state: AppState):
         app_state.cam_yaw_deg = 45.0
         app_state.cam_pitch_deg = 25.0
         app_state.cam_distance = 6.0
+    if imgui.button("Add current view to scene"):
+        app_state.add_current_camera_to_scene()
 
     imgui.separator()
     imgui.text("Point Cloud:")
